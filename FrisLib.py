@@ -7,8 +7,6 @@ import itertools
 
 class FrisCommon:
     def nearest_stolp(self, x, stolp_list=None):
-        print(x)
-        print(stolp_list)
         nbrs = NearestNeighbors(n_neighbors=1, metric='euclidean').fit(stolp_list)
         nn = nbrs.kneighbors([x], n_neighbors=1, return_distance=False)
         # print(nn[0][0])
@@ -23,7 +21,7 @@ class FrisCommon:
     def FRIS(self,a, s_a1, s_a2):
         return (self.m(s_a2, a) - self.m(s_a1, a)) / (self.m(s_a2, a) + self.m(s_a1, a))
 
-    def get_nn(self,object, object_list):
+    def get_nn_stolp_index(self, object, object_list):
         pass
 class FrisCluster(FrisCommon):
     def __init__(self, K, distance='euclidean', virtual_M=1):
@@ -72,7 +70,7 @@ class FrisCluster(FrisCommon):
         for k in range(2,self.__K):
             stolp_list = self.find_stolp(X, stolp_list)
         self.__stolp_list  = stolp_list
-        #self.__stolp_list =  self.distribute_stolp_list(stolp_list, X)
+        self.__stolp_list =  self.distribute_stolp_list(stolp_list, X)
 
 
     def get_stolp_list(self):
@@ -118,6 +116,8 @@ class FrisClass(FrisCommon):
             self.distance = distance
             self.m = lambda x, y: np.linalg.norm(x - y)
         self.__nn_stolp = None
+        self.__nn_all_data = None
+
 
     def get_stolp_list(self):
         return  self.__stolp_list
@@ -127,11 +127,11 @@ class FrisClass(FrisCommon):
         self.__nn_stolp = NearestNeighbors(metric=self.distance).fit(self.__stolp_list)
 
 
-    def get_nn(self,object, k):
+    def get_nn_stolp_index(self, object, k):
         nn = self.__nn_stolp.kneighbors([object], n_neighbors=k, return_distance=False)
         return nn[0]
     def get_nn_stolp(self,object, k):
-        nn_list = self.get_nn(object,k)
+        nn_list = self.get_nn_stolp_index(object, k)
         return list(map(lambda x: self.__stolp_list[x], nn_list))
 
     def get_stolp(self, stolp_index):
@@ -141,20 +141,57 @@ class FrisClass(FrisCommon):
         nn = self.__nn_stolp.kneighbors(X.values, n_neighbors=1, return_distance=False)
         cluster = X.apply(lambda x: nn[x.name][0], axis=1)
         return cluster
+    def union_condition(self, Da, Db, Dij):
+        return Da < self.__alpha*Db and Db < self.__alpha*Da and Dij < self.__alpha*(Da + Db)/2
+
 
     def fit(self, X, Y, stolp_list):
         self.__stolp_list = stolp_list
         self.__nn_stolp = NearestNeighbors(metric=self.distance).fit(stolp_list)
+        self.__nn_all_data = NearestNeighbors(metric=self.distance).fit(X.values)
         clusters_list = Y.unique()
         all_cluster_combinations = self.make_pair_combination(clusters_list)
-        rival_zone_dict = {}
-        for cluster_pair in all_cluster_combinations:
-            current_rival_zone = self.get_rival_zone(X[Y == cluster_pair[0]],X[Y == cluster_pair[1]], self.get_stolp(cluster_pair[0]), self.get_stolp(cluster_pair[1]))
-            if current_rival_zone.shape[0] != 0:
-                rival_zone_dict[cluster_pair] = current_rival_zone
+        union_candidates = []
+        for i,j in all_cluster_combinations:
+            current_rival_zone = self.get_rival_zone(X[Y == i].reset_index(drop=True),X[Y == j].reset_index(drop=True), self.get_stolp(i), self.get_stolp(j))
+            cluster_Ai = current_rival_zone[current_rival_zone["cluster"] == i]
+            cluster_Aj = current_rival_zone[current_rival_zone["cluster"] == j]
+            if cluster_Aj.shape[0] != 0 and cluster_Ai.shape[0] != 0:
+                cur_Dij, cur_Da, cur_Db = self.calc_D(cluster_Ai.drop("cluster", axis=1), cluster_Aj.drop("cluster", axis=1))
+                if self.union_condition(cur_Da, cur_Da, cur_Dij ):
+                    union_candidates.append((i,j))
 
+        new_clusters = Y.copy()
+        #for key, value in rival_zone_dict.items():
+        reduced_clusters = self.reduce_cluster_pair(union_candidates)
 
+        for clusters in reduced_clusters:
+            new_value = clusters[0]
+            new_clusters = new_clusters.where(~new_clusters.isin(clusters), new_value)
 
+        return new_clusters
+
+    def make_class(self,stolp_list,):
+        pass
+    
+    def reduce_cluster_pair(self, cand):
+        arr = []
+        s = cand.copy()
+        while s:
+            first = s.pop()
+            t = [first[0], first[1]]
+            for i in range(len(s)):
+                for val in s[i]:
+                    if val in t:
+                        t += list(s[i])
+                        arr.append(t)
+                        break
+        for i in arr:
+            for j in arr:
+                if i != j and any(val in i for val in j):
+                    i += j
+                    arr.remove(j)
+        return list(map(lambda x: np.unique(x), arr))
 
 
     def get_rival_zone(self,data_Ai, data_Aj, stolp_Ai, stolp_Aj):
@@ -184,15 +221,58 @@ class FrisClass(FrisCommon):
 
         cluster_data["cluster"] = self.get_df_stolps(cluster_data.drop(['ns', 'F_metric', 'stolp_distance'],axis=1))
 
-        return cluster_data
+        rival_df = cluster_data[cluster_data["ns"] & cluster_data["F_metric"] & cluster_data["stolp_distance"]]
+        return rival_df.drop(['ns', 'F_metric', 'stolp_distance'],axis=1)
+    '''
+    Вычисление расстояние Dij,Da,Db между кластерами Ai и Aj
+    '''
+    def calc_D(self,cluster_Ai, cluster_Aj):
+        distance_matrix = pairwise_distances(cluster_Ai, cluster_Aj, metric=self.m)
+        Ai_min, Aj_min = np.unravel_index(distance_matrix.argmin(), distance_matrix.shape)
+        Dij = distance_matrix[Ai_min][ Aj_min]
+        object_list = [cluster_Ai.iloc[Ai_min].values, cluster_Aj.iloc[Aj_min].values]
+        Da, Db = self.get_Da_Db(object_list)
 
-    def call_Dij(self, data):
+        return  Dij, Da, Db
+
+
+    def calc_Dij(self, cluster_Ai, cluster_Aj):
+        distance_matrix  = pairwise_distances(cluster_Ai, cluster_Aj, metric=self.m)
+        Ai_min, Aj_max = np.unravel_index(distance_matrix.argmin(), distance_matrix.shape)
+        Dij = distance_matrix[[Ai_min, Aj_max]]
+        return Dij
+
+    def get_Da_Db(self,object_list):
+        d = self.__nn_all_data.kneighbors(object_list, n_neighbors=2, return_distance=True)
+        return d[0][0][1], d[0][1][1]
 
 
     def make_pair_combination(self, array):
         return list(filter(lambda x: x[0] != x[1] ,list(itertools.product(array,array))))
 
-class FrisTax:
-    pass
+class FrisTax(FrisCommon):
+    def __init__(self, K, F_threshold,distance='euclidean', virtual_M=1, alpha=1.5):
+        self.__K = K
+        self.__virtual_m = virtual_M
+        self.__alpha = alpha
+        self.__F_threshold = F_threshold
+        if distance == 'euclidean':
+            self.distance = distance
+            self.m = lambda x, y: np.linalg.norm(x - y)
+
+
+    def fit(self, X, Y):
+        f_cluster = FrisCluster(self.__K,self.distance,self.__virtual_m)
+        f_class = FrisClass(self.__F_threshold, self.__alpha, self.distance)
+
+        f_cluster.fit(X)
+        stolps = f_cluster.get_stolp_list()
+
+        f_class.f()
+
+
+    def predict(self):
+        pass
+
 
 

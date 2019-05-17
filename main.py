@@ -57,6 +57,10 @@ clusters_list = cluster.unique()
 
 all_cluster_combinations = FrisC.make_pair_combination(clusters_list)
 cluster_pair = all_cluster_combinations[0]
+FrisC.fit(X, cluster, stable_stolps)
+
+
+
 FrisC.get_rival_zone(X[cluster == cluster_pair[0]],
                      X[cluster == cluster_pair[1]],
                      FrisC.get_stolp(cluster_pair[0]),
